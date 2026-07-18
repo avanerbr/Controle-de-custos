@@ -257,18 +257,11 @@ export default function DashboardPage() {
             />
           </div>
 
-          <div className="grid sm:grid-cols-2 gap-4">
-            <SaldoCard
-              label="Saldo Casa"
-              income={incomeByGroup.casa}
-              expense={totalsByGroup.casa}
-            />
-            <SaldoCard
-              label="Saldo Empresa"
-              income={incomeByGroup.empresa}
-              expense={totalsByGroup.empresa}
-            />
-          </div>
+          <SaldoCard
+            label="Saldo geral (Casa + Empresa)"
+            income={incomeByGroup.casa + incomeByGroup.empresa}
+            expense={totalsByGroup.casa + totalsByGroup.empresa}
+          />
 
           <div className="card">
             <h2 className="font-medium text-slate-900 mb-4">
