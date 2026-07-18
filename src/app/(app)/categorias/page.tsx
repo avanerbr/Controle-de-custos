@@ -6,6 +6,12 @@ import type { Category, GroupType } from "@/types/database";
 
 const DEFAULT_COLORS = ["#2563eb", "#16a34a", "#f97316", "#8b5cf6", "#ec4899", "#0ea5e9", "#dc2626"];
 
+const GROUPS: { key: GroupType; label: string }[] = [
+  { key: "casa", label: "Casa" },
+  { key: "empresa", label: "Empresa" },
+  { key: "investimento", label: "Investimento" },
+];
+
 export default function CategoriasPage() {
   const supabase = createClient();
   const [categories, setCategories] = useState<Category[]>([]);
@@ -15,6 +21,9 @@ export default function CategoriasPage() {
   const [recurring, setRecurring] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editingName, setEditingName] = useState("");
 
   async function loadCategories() {
     setLoading(true);
@@ -70,16 +79,30 @@ export default function CategoriasPage() {
     loadCategories();
   }
 
-  const casa = categories.filter((c) => c.group_type === "casa");
-  const empresa = categories.filter((c) => c.group_type === "empresa");
+  function startEditing(c: Category) {
+    setEditingId(c.id);
+    setEditingName(c.name);
+  }
+
+  async function saveEditing(id: string) {
+    const trimmed = editingName.trim();
+    if (!trimmed) {
+      setEditingId(null);
+      return;
+    }
+    await supabase.from("categories").update({ name: trimmed }).eq("id", id);
+    setEditingId(null);
+    loadCategories();
+  }
 
   return (
     <div className="space-y-6">
       <div>
         <h1 className="text-xl font-semibold text-slate-900">Categorias</h1>
         <p className="text-sm text-slate-500">
-          Crie quantas categorias quiser, separadas por Casa ou Empresa. Marque como "recorrente"
-          contas fixas mensais, ou deixe desmarcado para gastos avulsos/diários.
+          Crie quantas categorias quiser, separadas por Casa, Empresa ou Investimento. Marque como
+          "recorrente" contas fixas mensais (elas entram sozinhas todo mês em Lançar despesas), ou
+          deixe desmarcado para gastos avulsos/diários.
         </p>
       </div>
 
@@ -100,8 +123,11 @@ export default function CategoriasPage() {
             value={groupType}
             onChange={(e) => setGroupType(e.target.value as GroupType)}
           >
-            <option value="casa">Casa</option>
-            <option value="empresa">Empresa</option>
+            {GROUPS.map((g) => (
+              <option key={g.key} value={g.key}>
+                {g.label}
+              </option>
+            ))}
           </select>
         </div>
         <div>
@@ -124,19 +150,22 @@ export default function CategoriasPage() {
       {loading ? (
         <p className="text-sm text-slate-500">Carregando...</p>
       ) : (
-        <div className="grid md:grid-cols-2 gap-6">
-          <CategoryGroupList
-            title="Casa"
-            categories={casa}
-            onArchive={handleArchive}
-            onDelete={handleDelete}
-          />
-          <CategoryGroupList
-            title="Empresa"
-            categories={empresa}
-            onArchive={handleArchive}
-            onDelete={handleDelete}
-          />
+        <div className="grid md:grid-cols-3 gap-6">
+          {GROUPS.map((g) => (
+            <CategoryGroupList
+              key={g.key}
+              title={g.label}
+              categories={categories.filter((c) => c.group_type === g.key)}
+              editingId={editingId}
+              editingName={editingName}
+              onStartEdit={startEditing}
+              onEditingNameChange={setEditingName}
+              onSaveEdit={saveEditing}
+              onCancelEdit={() => setEditingId(null)}
+              onArchive={handleArchive}
+              onDelete={handleDelete}
+            />
+          ))}
         </div>
       )}
     </div>
@@ -146,11 +175,23 @@ export default function CategoriasPage() {
 function CategoryGroupList({
   title,
   categories,
+  editingId,
+  editingName,
+  onStartEdit,
+  onEditingNameChange,
+  onSaveEdit,
+  onCancelEdit,
   onArchive,
   onDelete,
 }: {
   title: string;
   categories: Category[];
+  editingId: string | null;
+  editingName: string;
+  onStartEdit: (c: Category) => void;
+  onEditingNameChange: (v: string) => void;
+  onSaveEdit: (id: string) => void;
+  onCancelEdit: () => void;
   onArchive: (id: string, archived: boolean) => void;
   onDelete: (id: string) => void;
 }) {
@@ -165,18 +206,36 @@ function CategoryGroupList({
               c.archived ? "opacity-50" : ""
             }`}
           >
-            <div className="flex items-center gap-2 min-w-0">
-              <span
-                className="w-2.5 h-2.5 rounded-full shrink-0"
-                style={{ backgroundColor: c.color }}
+            {editingId === c.id ? (
+              <input
+                autoFocus
+                className="input flex-1 py-1"
+                value={editingName}
+                onChange={(e) => onEditingNameChange(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") onSaveEdit(c.id);
+                  if (e.key === "Escape") onCancelEdit();
+                }}
+                onBlur={() => onSaveEdit(c.id)}
               />
-              <span className="text-sm text-slate-800 truncate">{c.name}</span>
-              {!c.recurring && (
-                <span className="text-[10px] uppercase tracking-wide text-slate-400 border border-slate-200 rounded px-1.5 py-0.5 shrink-0">
-                  avulso
-                </span>
-              )}
-            </div>
+            ) : (
+              <div
+                className="flex items-center gap-2 min-w-0 cursor-pointer flex-1"
+                onClick={() => onStartEdit(c)}
+                title="Clique para renomear"
+              >
+                <span
+                  className="w-2.5 h-2.5 rounded-full shrink-0"
+                  style={{ backgroundColor: c.color }}
+                />
+                <span className="text-sm text-slate-800 truncate">{c.name}</span>
+                {!c.recurring && (
+                  <span className="text-[10px] uppercase tracking-wide text-slate-400 border border-slate-200 rounded px-1.5 py-0.5 shrink-0">
+                    avulso
+                  </span>
+                )}
+              </div>
+            )}
             <div className="flex items-center gap-1 shrink-0">
               <button
                 onClick={() => onArchive(c.id, c.archived)}

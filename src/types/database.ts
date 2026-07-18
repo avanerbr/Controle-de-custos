@@ -1,4 +1,5 @@
-export type GroupType = "casa" | "empresa";
+export type GroupType = "casa" | "empresa" | "investimento";
+export type IncomeGroupType = "casa" | "empresa";
 
 export interface Category {
   id: string;
@@ -30,4 +31,19 @@ export interface ExpenseView extends Expense {
   group_type: GroupType;
   color: string;
   recurring: boolean;
+}
+
+export interface Income {
+  id: string;
+  group_type: IncomeGroupType;
+  amount: number;
+  income_date: string;
+  note: string | null;
+  created_by: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface IncomeView extends Income {
+  month_ref: string;
 }

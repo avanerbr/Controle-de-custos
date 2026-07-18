@@ -9,7 +9,6 @@ FROM node:20-alpine AS builder
 WORKDIR /app
 COPY --from=deps /app/node_modules ./node_modules
 COPY . .
-RUN mkdir -p public
 
 # Variáveis NEXT_PUBLIC_* precisam existir no momento do build.
 # No Coolify: Settings > Build Variables (ou Environment com "Available at build time").

@@ -2,7 +2,7 @@
 
 import { useEffect, useMemo, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
-import type { ExpenseView, GroupType } from "@/types/database";
+import type { Category, ExpenseView, GroupType, IncomeGroupType, IncomeView } from "@/types/database";
 import { currentMonthRef, formatBRL, formatMonthLabel, lastNMonths } from "@/lib/utils";
 import MonthPicker from "@/components/MonthPicker";
 import EvolutionChart, { EvolutionPoint } from "@/components/EvolutionChart";
@@ -11,37 +11,63 @@ import CategoryBreakdownChart, { BreakdownItem } from "@/components/CategoryBrea
 const HISTORY_MONTHS = 12;
 const ALERT_THRESHOLD = 1.2; // 20% acima da média histórica
 
+const GROUPS: { key: GroupType; label: string; color: string }[] = [
+  { key: "casa", label: "Casa", color: "#2563eb" },
+  { key: "empresa", label: "Empresa", color: "#16a34a" },
+  { key: "investimento", label: "Investimento", color: "#a855f7" },
+];
+
+function todayStr() {
+  return new Date().toISOString().slice(0, 10);
+}
+
 export default function DashboardPage() {
   const supabase = createClient();
   const [month, setMonth] = useState(currentMonthRef());
   const [allExpenses, setAllExpenses] = useState<ExpenseView[]>([]);
+  const [incomes, setIncomes] = useState<IncomeView[]>([]);
+  const [categories, setCategories] = useState<Category[]>([]);
   const [loading, setLoading] = useState(true);
+
+  // lançamento rápido
+  const [quickGroup, setQuickGroup] = useState<GroupType>("casa");
+  const [quickAmount, setQuickAmount] = useState("");
+  const [quickNote, setQuickNote] = useState("");
+  const [quickSaving, setQuickSaving] = useState(false);
+  const [quickError, setQuickError] = useState<string | null>(null);
 
   const months = useMemo(() => lastNMonths(HISTORY_MONTHS), []);
 
+  async function loadAll() {
+    setLoading(true);
+    const [{ data: expensesData }, { data: incomesData }, { data: categoriesData }] = await Promise.all([
+      supabase.from("expenses_view").select("*").gte("month_ref", months[0]).order("expense_date", { ascending: true }),
+      supabase.from("incomes_view").select("*").eq("month_ref", month),
+      supabase.from("categories").select("*").eq("archived", false),
+    ]);
+    if (expensesData) setAllExpenses(expensesData as ExpenseView[]);
+    if (incomesData) setIncomes(incomesData as IncomeView[]);
+    if (categoriesData) setCategories(categoriesData as Category[]);
+    setLoading(false);
+  }
+
   useEffect(() => {
-    async function load() {
-      setLoading(true);
-      const { data } = await supabase
-        .from("expenses_view")
-        .select("*")
-        .gte("month_ref", months[0])
-        .order("expense_date", { ascending: true });
-      if (data) setAllExpenses(data as ExpenseView[]);
-      setLoading(false);
-    }
-    load();
+    loadAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+  }, [month]);
 
   const evolutionData: EvolutionPoint[] = useMemo(() => {
     return months.map((m) => {
       const inMonth = allExpenses.filter((e) => e.month_ref === m);
-      const casa = inMonth.filter((e) => e.group_type === "casa").reduce((s, e) => s + Number(e.amount), 0);
-      const empresa = inMonth
-        .filter((e) => e.group_type === "empresa")
-        .reduce((s, e) => s + Number(e.amount), 0);
-      return { label: formatMonthLabel(m), casa, empresa, total: casa + empresa };
+      const totals: Record<GroupType, number> = { casa: 0, empresa: 0, investimento: 0 };
+      for (const e of inMonth) totals[e.group_type] += Number(e.amount);
+      return {
+        label: formatMonthLabel(m),
+        casa: totals.casa,
+        empresa: totals.empresa,
+        investimento: totals.investimento,
+        total: totals.casa + totals.empresa + totals.investimento,
+      };
     });
   }, [allExpenses, months]);
 
@@ -51,10 +77,16 @@ export default function DashboardPage() {
   );
 
   const totalsByGroup = useMemo(() => {
-    const totals: Record<GroupType, number> = { casa: 0, empresa: 0 };
+    const totals: Record<GroupType, number> = { casa: 0, empresa: 0, investimento: 0 };
     for (const e of selectedMonthExpenses) totals[e.group_type] += Number(e.amount);
     return totals;
   }, [selectedMonthExpenses]);
+
+  const incomeByGroup = useMemo(() => {
+    const totals: Record<IncomeGroupType, number> = { casa: 0, empresa: 0 };
+    for (const i of incomes) totals[i.group_type] += Number(i.amount);
+    return totals;
+  }, [incomes]);
 
   function breakdownFor(group: GroupType): BreakdownItem[] {
     const map = new Map<string, BreakdownItem>();
@@ -96,7 +128,6 @@ export default function DashboardPage() {
       }
     }
 
-    // sum history per month then average, so months with no expense count as 0
     for (const [key, entry] of byCategory) {
       const monthTotals = priorMonths.map((m) =>
         allExpenses
@@ -117,27 +148,125 @@ export default function DashboardPage() {
     return results.sort((a, b) => b.current - b.avg - (a.current - a.avg));
   }, [allExpenses, months, month]);
 
+  async function handleQuickAdd(e: React.FormEvent) {
+    e.preventDefault();
+    const value = Number(quickAmount.replace(",", "."));
+    if (!value || value <= 0) {
+      setQuickError("Informe um valor válido.");
+      return;
+    }
+
+    // usa a primeira categoria "avulsa" do grupo escolhido; se não achar, usa a primeira categoria do grupo
+    const groupCategories = categories.filter((c) => c.group_type === quickGroup);
+    const targetCategory =
+      groupCategories.find((c) => !c.recurring) ?? groupCategories[0];
+
+    if (!targetCategory) {
+      setQuickError("Crie uma categoria nesse grupo primeiro (em Categorias).");
+      return;
+    }
+
+    setQuickSaving(true);
+    setQuickError(null);
+
+    const { error } = await supabase.from("expenses").insert({
+      category_id: targetCategory.id,
+      amount: value,
+      expense_date: todayStr(),
+      paid: true,
+      note: quickNote || null,
+    });
+
+    setQuickSaving(false);
+
+    if (error) {
+      setQuickError("Não foi possível salvar.");
+      return;
+    }
+
+    setQuickAmount("");
+    setQuickNote("");
+    loadAll();
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex items-center justify-between flex-wrap gap-3">
         <div>
           <h1 className="text-xl font-semibold text-slate-900">Dashboard</h1>
-          <p className="text-sm text-slate-500">Evolução dos gastos de Casa e Empresa</p>
+          <p className="text-sm text-slate-500">Evolução dos gastos de Casa, Empresa e Investimento</p>
         </div>
         <MonthPicker value={month} onChange={setMonth} />
       </div>
+
+      <form onSubmit={handleQuickAdd} className="card">
+        <h2 className="font-medium text-slate-900 mb-3">Lançamento rápido de hoje</h2>
+        <div className="grid sm:grid-cols-2 md:grid-cols-4 gap-3 items-end">
+          <div>
+            <label className="label">Grupo</label>
+            <select
+              className="input"
+              value={quickGroup}
+              onChange={(e) => setQuickGroup(e.target.value as GroupType)}
+            >
+              {GROUPS.map((g) => (
+                <option key={g.key} value={g.key}>
+                  {g.label}
+                </option>
+              ))}
+            </select>
+          </div>
+          <div>
+            <label className="label">Valor (R$)</label>
+            <input
+              className="input"
+              inputMode="decimal"
+              placeholder="0,00"
+              value={quickAmount}
+              onChange={(e) => setQuickAmount(e.target.value)}
+            />
+          </div>
+          <div className="sm:col-span-2 md:col-span-1">
+            <label className="label">O que é?</label>
+            <input
+              className="input"
+              value={quickNote}
+              onChange={(e) => setQuickNote(e.target.value)}
+              placeholder="Ex.: almoço, uber..."
+            />
+          </div>
+          <button type="submit" className="btn-primary" disabled={quickSaving}>
+            {quickSaving ? "Salvando..." : "Adicionar"}
+          </button>
+        </div>
+        {quickError && <p className="text-sm text-red-600 mt-2">{quickError}</p>}
+      </form>
 
       {loading ? (
         <p className="text-sm text-slate-500">Carregando...</p>
       ) : (
         <>
-          <div className="grid sm:grid-cols-3 gap-4">
-            <SummaryCard label="Casa" value={totalsByGroup.casa} color="#2563eb" />
-            <SummaryCard label="Empresa" value={totalsByGroup.empresa} color="#16a34a" />
+          <div className="grid sm:grid-cols-2 lg:grid-cols-4 gap-4">
+            {GROUPS.map((g) => (
+              <SummaryCard key={g.key} label={g.label} value={totalsByGroup[g.key]} color={g.color} />
+            ))}
             <SummaryCard
               label="Total do mês"
-              value={totalsByGroup.casa + totalsByGroup.empresa}
+              value={totalsByGroup.casa + totalsByGroup.empresa + totalsByGroup.investimento}
               color="#0f172a"
+            />
+          </div>
+
+          <div className="grid sm:grid-cols-2 gap-4">
+            <SaldoCard
+              label="Saldo Casa"
+              income={incomeByGroup.casa}
+              expense={totalsByGroup.casa}
+            />
+            <SaldoCard
+              label="Saldo Empresa"
+              income={incomeByGroup.empresa}
+              expense={totalsByGroup.empresa}
             />
           </div>
 
@@ -178,27 +307,19 @@ export default function DashboardPage() {
             </div>
           )}
 
-          <div className="grid md:grid-cols-2 gap-6">
-            <div className="card">
-              <h2 className="font-medium text-slate-900 mb-3">
-                Casa por categoria — {formatMonthLabel(month)}
-              </h2>
-              {breakdownFor("casa").length > 0 ? (
-                <CategoryBreakdownChart data={breakdownFor("casa")} />
-              ) : (
-                <p className="text-sm text-slate-400">Sem lançamentos neste mês.</p>
-              )}
-            </div>
-            <div className="card">
-              <h2 className="font-medium text-slate-900 mb-3">
-                Empresa por categoria — {formatMonthLabel(month)}
-              </h2>
-              {breakdownFor("empresa").length > 0 ? (
-                <CategoryBreakdownChart data={breakdownFor("empresa")} />
-              ) : (
-                <p className="text-sm text-slate-400">Sem lançamentos neste mês.</p>
-              )}
-            </div>
+          <div className="grid md:grid-cols-3 gap-6">
+            {GROUPS.map((g) => (
+              <div key={g.key} className="card">
+                <h2 className="font-medium text-slate-900 mb-3">
+                  {g.label} por categoria — {formatMonthLabel(month)}
+                </h2>
+                {breakdownFor(g.key).length > 0 ? (
+                  <CategoryBreakdownChart data={breakdownFor(g.key)} />
+                ) : (
+                  <p className="text-sm text-slate-400">Sem lançamentos neste mês.</p>
+                )}
+              </div>
+            ))}
           </div>
         </>
       )}
@@ -213,6 +334,29 @@ function SummaryCard({ label, value, color }: { label: string; value: number; co
       <p className="text-2xl font-semibold mt-1" style={{ color }}>
         {formatBRL(value)}
       </p>
+    </div>
+  );
+}
+
+function SaldoCard({ label, income, expense }: { label: string; income: number; expense: number }) {
+  const saldo = income - expense;
+  return (
+    <div className="card">
+      <p className="text-xs font-medium text-slate-500 mb-2">{label}</p>
+      <div className="flex items-center justify-between text-sm">
+        <span className="text-slate-500">Entradas</span>
+        <span className="text-green-700 font-medium">{formatBRL(income)}</span>
+      </div>
+      <div className="flex items-center justify-between text-sm mt-1">
+        <span className="text-slate-500">Despesas</span>
+        <span className="text-red-600 font-medium">{formatBRL(expense)}</span>
+      </div>
+      <div className="flex items-center justify-between text-sm mt-2 pt-2 border-t border-slate-100">
+        <span className="text-slate-700 font-medium">Sobra</span>
+        <span className={`font-semibold ${saldo >= 0 ? "text-green-700" : "text-red-600"}`}>
+          {formatBRL(saldo)}
+        </span>
+      </div>
     </div>
   );
 }

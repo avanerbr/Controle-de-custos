@@ -6,6 +6,12 @@ import type { Category, ExpenseView, GroupType } from "@/types/database";
 import { currentMonthRef, formatBRL } from "@/lib/utils";
 import MonthPicker from "@/components/MonthPicker";
 
+const GROUPS: { key: GroupType; label: string }[] = [
+  { key: "casa", label: "Casa" },
+  { key: "empresa", label: "Empresa" },
+  { key: "investimento", label: "Investimento" },
+];
+
 function todayStr() {
   return new Date().toISOString().slice(0, 10);
 }
@@ -16,13 +22,13 @@ export default function DespesasPage() {
   const [categories, setCategories] = useState<Category[]>([]);
   const [expenses, setExpenses] = useState<ExpenseView[]>([]);
   const [loading, setLoading] = useState(true);
+  const [syncing, setSyncing] = useState(false);
 
   const [categoryId, setCategoryId] = useState("");
   const [amount, setAmount] = useState("");
   const [date, setDate] = useState(todayStr());
   const [paid, setPaid] = useState(false);
   const [note, setNote] = useState("");
-  const [whereToPay, setWhereToPay] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -37,26 +43,73 @@ export default function DespesasPage() {
       setCategories(data as Category[]);
       if (!categoryId && data.length > 0) setCategoryId((data as Category[])[0].id);
     }
+    return (data ?? []) as Category[];
   }
 
   async function loadExpenses() {
-    setLoading(true);
     const { data } = await supabase
       .from("expenses_view")
       .select("*")
       .eq("month_ref", month)
       .order("expense_date", { ascending: false });
     if (data) setExpenses(data as ExpenseView[]);
+    return (data ?? []) as ExpenseView[];
+  }
+
+  // Garante que toda categoria "recorrente" já tenha um lançamento no mês
+  // selecionado, copiando o valor do mês anterior (editável depois).
+  async function ensureRecurringExpenses(cats: Category[], monthRef: string) {
+    const recurringCats = cats.filter((c) => c.recurring && !c.archived);
+    if (recurringCats.length === 0) return;
+
+    const { data: existing } = await supabase
+      .from("expenses_view")
+      .select("category_id")
+      .eq("month_ref", monthRef);
+
+    const existingIds = new Set((existing ?? []).map((e: { category_id: string }) => e.category_id));
+    const missing = recurringCats.filter((c) => !existingIds.has(c.id));
+    if (missing.length === 0) return;
+
+    setSyncing(true);
+
+    const toInsert = [];
+    for (const cat of missing) {
+      const { data: previous } = await supabase
+        .from("expenses")
+        .select("amount")
+        .eq("category_id", cat.id)
+        .lt("expense_date", monthRef)
+        .order("expense_date", { ascending: false })
+        .limit(1);
+
+      const previousAmount = previous && previous.length > 0 ? previous[0].amount : 0;
+
+      toInsert.push({
+        category_id: cat.id,
+        amount: previousAmount,
+        expense_date: monthRef,
+        paid: false,
+      });
+    }
+
+    if (toInsert.length > 0) {
+      await supabase.from("expenses").insert(toInsert);
+    }
+
+    setSyncing(false);
+  }
+
+  async function refreshAll() {
+    setLoading(true);
+    const cats = await loadCategories();
+    await ensureRecurringExpenses(cats, month);
+    await loadExpenses();
     setLoading(false);
   }
 
   useEffect(() => {
-    loadCategories();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
-
-  useEffect(() => {
-    loadExpenses();
+    refreshAll();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [month]);
 
@@ -76,7 +129,6 @@ export default function DespesasPage() {
       expense_date: date,
       paid,
       note: note || null,
-      where_to_pay: whereToPay || null,
     });
 
     setSaving(false);
@@ -88,7 +140,6 @@ export default function DespesasPage() {
 
     setAmount("");
     setNote("");
-    setWhereToPay("");
     setPaid(false);
     loadExpenses();
   }
@@ -98,19 +149,35 @@ export default function DespesasPage() {
     loadExpenses();
   }
 
+  async function updateAmount(id: string, value: number) {
+    setExpenses((prev) => prev.map((e) => (e.id === id ? { ...e, amount: value } : e)));
+    await supabase.from("expenses").update({ amount: value }).eq("id", id);
+  }
+
   async function handleDelete(id: string) {
     if (!confirm("Excluir esta despesa?")) return;
     await supabase.from("expenses").delete().eq("id", id);
     loadExpenses();
   }
 
-  const casaCategories = categories.filter((c) => c.group_type === "casa");
-  const empresaCategories = categories.filter((c) => c.group_type === "empresa");
+  const categoriesByGroup = useMemo(() => {
+    const map: Record<GroupType, Category[]> = { casa: [], empresa: [], investimento: [] };
+    for (const c of categories) map[c.group_type].push(c);
+    return map;
+  }, [categories]);
 
   const grouped = useMemo(() => {
-    const groups: Record<GroupType, ExpenseView[]> = { casa: [], empresa: [] };
+    const groups: Record<GroupType, ExpenseView[]> = { casa: [], empresa: [], investimento: [] };
     for (const e of expenses) groups[e.group_type].push(e);
     return groups;
+  }, [expenses]);
+
+  const paidSummary = useMemo(() => {
+    const paidTotal = expenses.filter((e) => e.paid).reduce((s, e) => s + Number(e.amount), 0);
+    const pendingTotal = expenses.filter((e) => !e.paid).reduce((s, e) => s + Number(e.amount), 0);
+    const paidCount = expenses.filter((e) => e.paid).length;
+    const pendingCount = expenses.filter((e) => !e.paid).length;
+    return { paidTotal, pendingTotal, paidCount, pendingCount };
   }, [expenses]);
 
   return (
@@ -119,13 +186,31 @@ export default function DespesasPage() {
         <div>
           <h1 className="text-xl font-semibold text-slate-900">Lançar despesas</h1>
           <p className="text-sm text-slate-500">
-            Contas fixas do mês ou gastos avulsos/diários — tudo entra no mesmo lançamento.
+            Contas fixas entram sozinhas todo mês (é só ajustar o valor) — gastos avulsos você
+            lança na hora.
           </p>
         </div>
         <MonthPicker value={month} onChange={setMonth} />
       </div>
 
-      <form onSubmit={handleCreate} className="card grid md:grid-cols-6 gap-3 items-end">
+      <div className="grid sm:grid-cols-2 gap-4">
+        <div className="card flex items-center justify-between">
+          <div>
+            <p className="text-xs font-medium text-slate-500">Pago</p>
+            <p className="text-lg font-semibold text-green-700">{formatBRL(paidSummary.paidTotal)}</p>
+          </div>
+          <span className="text-xs text-slate-400">{paidSummary.paidCount} lançamento(s)</span>
+        </div>
+        <div className="card flex items-center justify-between">
+          <div>
+            <p className="text-xs font-medium text-slate-500">Falta pagar</p>
+            <p className="text-lg font-semibold text-red-600">{formatBRL(paidSummary.pendingTotal)}</p>
+          </div>
+          <span className="text-xs text-slate-400">{paidSummary.pendingCount} lançamento(s)</span>
+        </div>
+      </div>
+
+      <form onSubmit={handleCreate} className="card grid sm:grid-cols-2 md:grid-cols-6 gap-3 items-end">
         <div className="md:col-span-2">
           <label className="label">Categoria</label>
           <select
@@ -133,20 +218,15 @@ export default function DespesasPage() {
             value={categoryId}
             onChange={(e) => setCategoryId(e.target.value)}
           >
-            <optgroup label="Casa">
-              {casaCategories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </optgroup>
-            <optgroup label="Empresa">
-              {empresaCategories.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </optgroup>
+            {GROUPS.map((g) => (
+              <optgroup key={g.key} label={g.label}>
+                {categoriesByGroup[g.key].map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </optgroup>
+            ))}
           </select>
         </div>
 
@@ -172,15 +252,12 @@ export default function DespesasPage() {
         </div>
 
         <div className="md:col-span-2">
-          <label className="label">Onde pagar / observação</label>
+          <label className="label">Observação (opcional)</label>
           <input
             className="input"
-            value={note || whereToPay}
-            onChange={(e) => {
-              setNote(e.target.value);
-              setWhereToPay(e.target.value);
-            }}
-            placeholder="Opcional"
+            value={note}
+            onChange={(e) => setNote(e.target.value)}
+            placeholder="Ex.: mercado da semana"
           />
         </div>
 
@@ -197,7 +274,7 @@ export default function DespesasPage() {
           </label>
         </div>
 
-        <div className="md:col-span-6 flex items-center gap-3">
+        <div className="sm:col-span-2 md:col-span-6 flex items-center gap-3">
           <button type="submit" className="btn-primary" disabled={saving}>
             {saving ? "Salvando..." : "Adicionar despesa"}
           </button>
@@ -208,20 +285,23 @@ export default function DespesasPage() {
       {loading ? (
         <p className="text-sm text-slate-500">Carregando...</p>
       ) : (
-        <div className="grid md:grid-cols-2 gap-6">
-          <ExpenseGroupTable
-            title="Casa"
-            expenses={grouped.casa}
-            onTogglePaid={togglePaid}
-            onDelete={handleDelete}
-          />
-          <ExpenseGroupTable
-            title="Empresa"
-            expenses={grouped.empresa}
-            onTogglePaid={togglePaid}
-            onDelete={handleDelete}
-          />
-        </div>
+        <>
+          {syncing && (
+            <p className="text-xs text-slate-400">Preenchendo contas fixas do mês...</p>
+          )}
+          <div className="grid md:grid-cols-3 gap-6">
+            {GROUPS.map((g) => (
+              <ExpenseGroupTable
+                key={g.key}
+                title={g.label}
+                expenses={grouped[g.key]}
+                onTogglePaid={togglePaid}
+                onDelete={handleDelete}
+                onUpdateAmount={updateAmount}
+              />
+            ))}
+          </div>
+        </>
       )}
     </div>
   );
@@ -232,11 +312,13 @@ function ExpenseGroupTable({
   expenses,
   onTogglePaid,
   onDelete,
+  onUpdateAmount,
 }: {
   title: string;
   expenses: ExpenseView[];
   onTogglePaid: (e: ExpenseView) => void;
   onDelete: (id: string) => void;
+  onUpdateAmount: (id: string, value: number) => void;
 }) {
   const total = expenses.reduce((sum, e) => sum + Number(e.amount), 0);
 
@@ -246,7 +328,7 @@ function ExpenseGroupTable({
         <h2 className="font-medium text-slate-900">{title}</h2>
         <span className="text-sm font-semibold text-slate-700">{formatBRL(total)}</span>
       </div>
-      <ul className="space-y-2 max-h-[420px] overflow-y-auto">
+      <ul className="space-y-2 max-h-[460px] overflow-y-auto">
         {expenses.map((e) => (
           <li
             key={e.id}
@@ -262,8 +344,8 @@ function ExpenseGroupTable({
                 {e.note ? ` · ${e.note}` : ""}
               </p>
             </div>
-            <div className="flex items-center gap-3 shrink-0">
-              <span className="text-sm font-medium text-slate-700">{formatBRL(Number(e.amount))}</span>
+            <div className="flex items-center gap-2 shrink-0">
+              <EditableAmount value={Number(e.amount)} onSave={(v) => onUpdateAmount(e.id, v)} />
               <button
                 onClick={() => onTogglePaid(e)}
                 className={`text-xs rounded px-2 py-1 border ${
@@ -288,5 +370,54 @@ function ExpenseGroupTable({
         )}
       </ul>
     </div>
+  );
+}
+
+function EditableAmount({ value, onSave }: { value: number; onSave: (value: number) => void }) {
+  const [editing, setEditing] = useState(false);
+  const [draft, setDraft] = useState(String(value));
+
+  useEffect(() => {
+    setDraft(String(value));
+  }, [value]);
+
+  function commit() {
+    const parsed = Number(draft.replace(",", "."));
+    setEditing(false);
+    if (!isNaN(parsed) && parsed >= 0 && parsed !== value) {
+      onSave(parsed);
+    } else {
+      setDraft(String(value));
+    }
+  }
+
+  if (editing) {
+    return (
+      <input
+        autoFocus
+        className="input py-1 w-24 text-sm text-right"
+        inputMode="decimal"
+        value={draft}
+        onChange={(e) => setDraft(e.target.value)}
+        onBlur={commit}
+        onKeyDown={(e) => {
+          if (e.key === "Enter") commit();
+          if (e.key === "Escape") {
+            setDraft(String(value));
+            setEditing(false);
+          }
+        }}
+      />
+    );
+  }
+
+  return (
+    <button
+      onClick={() => setEditing(true)}
+      className="text-sm font-medium text-slate-700 hover:underline"
+      title="Clique para editar o valor"
+    >
+      {formatBRL(value)}
+    </button>
   );
 }

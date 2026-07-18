@@ -16,6 +16,7 @@ export interface EvolutionPoint {
   label: string;
   casa: number;
   empresa: number;
+  investimento: number;
   total: number;
 }
 
@@ -37,6 +38,14 @@ export default function EvolutionChart({ data }: { data: EvolutionPoint[] }) {
           dataKey="empresa"
           name="Empresa"
           stroke="#16a34a"
+          strokeWidth={2}
+          dot={{ r: 3 }}
+        />
+        <Line
+          type="monotone"
+          dataKey="investimento"
+          name="Investimento"
+          stroke="#a855f7"
           strokeWidth={2}
           dot={{ r: 3 }}
         />
