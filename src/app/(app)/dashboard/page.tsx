@@ -261,6 +261,7 @@ export default function DashboardPage() {
             label="Saldo geral (Casa + Empresa)"
             income={incomeByGroup.casa + incomeByGroup.empresa}
             expense={totalsByGroup.casa + totalsByGroup.empresa}
+            investimento={totalsByGroup.investimento}
           />
 
           <div className="card">
@@ -331,8 +332,18 @@ function SummaryCard({ label, value, color }: { label: string; value: number; co
   );
 }
 
-function SaldoCard({ label, income, expense }: { label: string; income: number; expense: number }) {
-  const saldo = income - expense;
+function SaldoCard({
+  label,
+  income,
+  expense,
+  investimento,
+}: {
+  label: string;
+  income: number;
+  expense: number;
+  investimento: number;
+}) {
+  const saldo = income - expense - investimento;
   return (
     <div className="card">
       <p className="text-xs font-medium text-slate-500 mb-2">{label}</p>
@@ -343,6 +354,10 @@ function SaldoCard({ label, income, expense }: { label: string; income: number; 
       <div className="flex items-center justify-between text-sm mt-1">
         <span className="text-slate-500">Despesas</span>
         <span className="text-red-600 font-medium">{formatBRL(expense)}</span>
+      </div>
+      <div className="flex items-center justify-between text-sm mt-1">
+        <span className="text-slate-500">Investimentos</span>
+        <span className="text-purple-700 font-medium">{formatBRL(investimento)}</span>
       </div>
       <div className="flex items-center justify-between text-sm mt-2 pt-2 border-t border-slate-100">
         <span className="text-slate-700 font-medium">Sobra</span>
